@@ -321,6 +321,8 @@ static MIGRATIONS: &[M] = &[
     M::up("ALTER TABLE meetings ADD COLUMN speaker_names TEXT NOT NULL DEFAULT '{}';"),
     // Notes: the meeting's title and the template its notes were written with.
     M::up("ALTER TABLE meetings ADD COLUMN title TEXT; ALTER TABLE meetings ADD COLUMN template TEXT;"),
+    // Why the notes written by themselves after a meeting failed.
+    M::up("ALTER TABLE meetings ADD COLUMN notes_error TEXT;"),
 ];
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Type)]
@@ -371,9 +373,12 @@ pub struct Meeting {
     pub speaker_names: HashMap<u32, String>,
     /// The AI is writing the summary right now.
     pub summarizing: bool,
-    /// Why it failed, or for a ready meeting a warning code the UI translates
-    /// (`system_audio_missing`).
+    /// Why it failed, or for a ready meeting its warnings, one per line: codes
+    /// the UI translates (`system_audio_missing`) or plain text.
     pub error: Option<String>,
+    /// Why the notes written by themselves after the meeting failed
+    /// (`no_provider`, or the AI's error), until notes are written.
+    pub notes_error: Option<String>,
 }
 
 struct Active {
@@ -665,7 +670,7 @@ impl MeetingManager {
                 let (lines, warning) = match lines {
                     Ok((lines, gaps)) => (
                         this.with_speakers(active.id, &folder, lines),
-                        system_audio_warning(&folder).or(gaps.warning()),
+                        warnings([system_audio_warning(&folder), gaps.warning()]),
                     ),
                     Err(e) => {
                         log::warn!(
@@ -675,7 +680,7 @@ impl MeetingManager {
                         this.transcribe(active.id)?
                     }
                 };
-                Ok((lines, mic_warning.or(warning)))
+                Ok((lines, warnings([mic_warning, warning])))
             });
             this.finish(active.id, result);
         });
@@ -707,6 +712,11 @@ impl MeetingManager {
                                 tauri::async_runtime::block_on(self.summarize(id, None, None))
                             {
                                 log::warn!("Meeting {id}: no summary: {e}");
+                                // Nobody asked for these notes, so no toast says why.
+                                let _ = conn.execute(
+                                    "UPDATE meetings SET notes_error = ?1 WHERE id = ?2",
+                                    params![e, id],
+                                );
                             }
                         }
                     }
@@ -756,7 +766,11 @@ impl MeetingManager {
         let this = self.clone();
         std::thread::spawn(move || {
             // A microphone that failed while recording still failed.
-            let kept = old.error.clone().filter(|e| e == "mic_failed");
+            let kept = old
+                .error
+                .as_deref()
+                .is_some_and(|e| e.lines().any(|code| code == "mic_failed"))
+                .then(|| "mic_failed".to_string());
             // Audio cut short (Owl quit or crashed before saving it all) never
             // replaces lines that were transcribed live from more of it.
             let saved_ms = ["mic.wav", "system.wav"]
@@ -783,7 +797,7 @@ impl MeetingManager {
                             "This meeting's audio can't be read, so its transcript was kept."
                         ));
                     }
-                    Ok((lines, kept.or(warning)))
+                    Ok((lines, warnings([kept, warning])))
                 })
             };
             match result {
@@ -794,7 +808,7 @@ impl MeetingManager {
                         let _ = conn.execute(
                             // "mic_failed" can't be worked out again, so it stays.
                             "UPDATE meetings SET status = 'ready',
-                             error = CASE WHEN error = 'mic_failed' THEN error ELSE ?1 END
+                             error = CASE WHEN error LIKE '%mic_failed%' THEN error ELSE ?1 END
                              WHERE id = ?2",
                             params![e.to_string(), id],
                         );
@@ -926,7 +940,7 @@ impl MeetingManager {
         lines.sort_by_key(|l| l.start_ms);
         Ok((
             self.with_speakers(id, &folder, lines),
-            system_audio_warning(&folder).or(gaps.warning()),
+            warnings([system_audio_warning(&folder), gaps.warning()]),
         ))
     }
 
@@ -1103,7 +1117,8 @@ impl MeetingManager {
                 .conn()
                 .and_then(|conn| {
                     Ok(conn.execute(
-                        "UPDATE meetings SET summary = ?1, template = ?2, title = COALESCE(title, ?3)
+                        "UPDATE meetings SET summary = ?1, template = ?2, title = COALESCE(title, ?3),
+                         notes_error = NULL
                          WHERE id = ?4 AND transcript IS ?5",
                         params![summary, template, title, id, revision],
                     )?)
@@ -1490,6 +1505,12 @@ fn split_tracks(stages: &Stages, mic: &[f32], system: Option<&[f32]>) -> Vec<(Sp
     out
 }
 
+/// A meeting's warnings as its `error`, one per line.
+fn warnings(found: [Option<String>; 2]) -> Option<String> {
+    let found: Vec<String> = found.into_iter().flatten().collect();
+    (!found.is_empty()).then(|| found.join("\n"))
+}
+
 /// `system_audio_missing` when the call audio came through empty.
 fn system_audio_warning(folder: &Path) -> Option<String> {
     let seconds = hound::WavReader::open(folder.join("system.wav"))
@@ -1619,7 +1640,7 @@ pub fn read_meeting(conn: &Connection, id: i64) -> Result<Option<Meeting>> {
 fn read_rows(conn: &Connection, tail: &str, params: impl rusqlite::Params) -> Result<Vec<Meeting>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT id, started_at, duration_ms, status, transcript, summary, error, speaker_names,
-                    title, template
+                    title, template, notes_error
              FROM meetings {tail}"
     ))?;
     let rows = stmt.query_map(params, |row| {
@@ -1638,6 +1659,7 @@ fn read_rows(conn: &Connection, tail: &str, params: impl rusqlite::Params) -> Re
             speaker_names: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
             summarizing: false,
             error: row.get(6)?,
+            notes_error: row.get(10)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1925,6 +1947,7 @@ mod tests {
             speaker_names: HashMap::from([(1, "Harry".to_string())]),
             summarizing: false,
             error: None,
+            notes_error: None,
         };
         let context = ask_context(&[
             meeting(2, MeetingStatus::Recording, None),
@@ -2142,6 +2165,7 @@ mod tests {
             speaker_names: HashMap::from([(1, "Harry".to_string())]),
             summarizing: false,
             error: None,
+            notes_error: None,
         }
     }
 

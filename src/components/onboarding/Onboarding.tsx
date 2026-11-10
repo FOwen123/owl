@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { commands } from "@/bindings";
 import { useSettings } from "../../hooks/useSettings";
 import { getLanguageDirection } from "@/lib/utils/rtl";
 import { Button } from "../ui/Button";
@@ -81,11 +82,13 @@ const Onboarding: React.FC<{
     if (!preview && !only) localStorage.setItem(KEY, JSON.stringify(updated));
   };
 
-  // shortcut: the backend marks onboarding done only when the model is
-  // selected, so quitting Owl before the picked model finishes downloading
-  // starts setup over; mark it done at Finish from the backend if that bites.
+  // Marked done here too: the picked model may still be downloading, and
+  // quitting Owl before it's selected would start setup over.
   const finish = () => {
-    if (!preview) localStorage.removeItem(KEY);
+    if (!preview) {
+      localStorage.removeItem(KEY);
+      commands.completeOnboarding();
+    }
     onDone();
   };
 

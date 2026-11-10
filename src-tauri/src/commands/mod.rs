@@ -72,6 +72,16 @@ pub fn get_app_settings(app: AppHandle) -> Result<AppSettings, String> {
     Ok(get_settings(&app))
 }
 
+/// Owl: setup's Finish. Selecting a model also marks setup done, but the one
+/// picked may still be downloading when the user finishes.
+#[tauri::command]
+#[specta::specta]
+pub fn complete_onboarding(app: AppHandle) {
+    let mut settings = get_settings(&app);
+    settings.onboarding_completed = true;
+    write_settings(&app, settings);
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn get_default_settings() -> Result<AppSettings, String> {
