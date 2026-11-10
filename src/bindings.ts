@@ -599,6 +599,13 @@ async getAppSettings() : Promise<Result<AppSettings, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Owl: setup's Finish. Selecting a model also marks setup done, but the one
+ * picked may still be downloading when the user finishes.
+ */
+async completeOnboarding() : Promise<void> {
+    await TAURI_INVOKE("complete_onboarding");
+},
 async getDefaultSettings() : Promise<Result<AppSettings, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_default_settings") };
@@ -1505,10 +1512,15 @@ speaker_names: Partial<{ [key in number]: string }>;
  */
 summarizing: boolean; 
 /**
- * Why it failed, or for a ready meeting a warning code the UI translates
- * (`system_audio_missing`).
+ * Why it failed, or for a ready meeting its warnings, one per line: codes
+ * the UI translates (`system_audio_missing`) or plain text.
  */
-error: string | null }
+error: string | null; 
+/**
+ * Why the notes written by themselves after the meeting failed
+ * (`no_provider`, or the AI's error), until notes are written.
+ */
+notes_error: string | null }
 export type MeetingStatus = "recording" | "transcribing" | "ready" | "failed"
 /**
  * Owl: a meeting-notes template the user wrote; the built-ins live in

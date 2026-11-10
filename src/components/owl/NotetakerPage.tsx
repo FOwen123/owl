@@ -58,6 +58,13 @@ const EXPORT_FORMATS: { format: ExportFormat; extension: string }[] = [
   { format: "vtt", extension: "vtt" },
 ];
 
+/** A ready meeting's warning codes (the lines of its `error`), as strings. */
+const WARNINGS: Record<string, string> = {
+  system_audio_missing: "owl.notetaker.systemAudioMissing",
+  mic_failed: "owl.notetaker.micFailed",
+  transcript_gaps: "owl.notetaker.transcriptGaps",
+};
+
 /** An AI error; `no_provider` offers to set one up. */
 const aiError = (error: string, t: TFunction) => {
   if (error === "no_provider") {
@@ -535,19 +542,26 @@ const MeetingDetail: React.FC<{
               : meeting.error}
         </Alert>
       )}
-      {meeting.status === "ready" &&
-        meeting.error &&
-        !["system_audio_missing", "mic_failed", "transcript_gaps"].includes(
-          meeting.error,
-        ) && <Alert variant="warning">{meeting.error}</Alert>}
-      {meeting.error === "system_audio_missing" && (
-        <Alert variant="warning">{t("owl.notetaker.systemAudioMissing")}</Alert>
-      )}
-      {meeting.error === "mic_failed" && (
-        <Alert variant="warning">{t("owl.notetaker.micFailed")}</Alert>
-      )}
-      {meeting.error === "transcript_gaps" && (
-        <Alert variant="warning">{t("owl.notetaker.transcriptGaps")}</Alert>
+      {meeting.status !== "failed" &&
+        meeting.error?.split("\n").map((warning) =>
+          warning in WARNINGS ? (
+            <Alert key={warning} variant="warning">
+              {t(WARNINGS[warning])}
+            </Alert>
+          ) : (
+            meeting.status === "ready" && (
+              <Alert key={warning} variant="warning">
+                {warning}
+              </Alert>
+            )
+          ),
+        )}
+      {meeting.status === "ready" && meeting.notes_error && (
+        <Alert variant="warning">
+          {meeting.notes_error === "no_provider"
+            ? t("owl.notetaker.summaryNeedsProvider")
+            : t("owl.notetaker.notesFailed", { error: meeting.notes_error })}
+        </Alert>
       )}
 
       {meeting.status === "ready" && (

@@ -208,6 +208,7 @@ const responses: Record<string, unknown> = {
       speaker_names: { 1: "Harry" },
       summarizing: false,
       error: null,
+      notes_error: null,
       transcript: [
         { start_ms: 2_000, speaker: "you", text: "好，我們開始今天的週會。" },
         {

@@ -2179,6 +2179,7 @@ impl ModelManager {
                 let _ = fs::remove_file(&partial_path);
             }
             self.update_download_status()?;
+            let _ = self.app_handle.emit("model-download-complete", model_id);
             return Ok(());
         }
 
@@ -2246,71 +2247,58 @@ impl ModelManager {
                 .join(format!("{}.extracting", model_info.filename));
             let final_model_dir = self.models_dir.join(&model_info.filename);
 
-            // Clean up any previous incomplete extraction
-            if temp_extract_dir.exists() {
-                let _ = fs::remove_dir_all(&temp_extract_dir);
-            }
-
-            // Create temporary extraction directory
-            fs::create_dir_all(&temp_extract_dir)?;
-
-            // Open the downloaded tar.gz file
-            let tar_gz = File::open(&partial_path)?;
-            let tar = GzDecoder::new(tar_gz);
-            let mut archive = Archive::new(tar);
-
-            // Extract to the temporary directory first
-            archive.unpack(&temp_extract_dir).map_err(|e| {
-                let error_msg = format!("Failed to extract archive: {}", e);
-                // Clean up failed extraction
-                let _ = fs::remove_dir_all(&temp_extract_dir);
-                // Delete the corrupt partial file so the next download attempt starts fresh
-                // instead of resuming from a broken archive (issue #858).
-                let _ = fs::remove_file(&partial_path);
-                // Remove from extracting set
-                {
-                    let mut extracting = self.extracting_models.lock().unwrap();
-                    extracting.remove(model_id);
+            // Every failure below ends the extraction, so the model never stays
+            // "Extracting" until Owl restarts.
+            let extracted = (|| -> Result<()> {
+                // Clean up any previous incomplete extraction
+                if temp_extract_dir.exists() {
+                    let _ = fs::remove_dir_all(&temp_extract_dir);
                 }
+                fs::create_dir_all(&temp_extract_dir)?;
+
+                // Extract to the temporary directory first
+                let tar_gz = File::open(&partial_path)?;
+                let mut archive = Archive::new(GzDecoder::new(tar_gz));
+                archive.unpack(&temp_extract_dir).map_err(|e| {
+                    // Delete the corrupt partial file so the next download attempt starts fresh
+                    // instead of resuming from a broken archive (issue #858).
+                    let _ = fs::remove_file(&partial_path);
+                    anyhow::anyhow!("Failed to extract archive: {}", e)
+                })?;
+
+                // Find the actual extracted directory (archive might have a nested structure)
+                let extracted_dirs: Vec<_> = fs::read_dir(&temp_extract_dir)?
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+                    .collect();
+
+                if final_model_dir.exists() {
+                    fs::remove_dir_all(&final_model_dir)?;
+                }
+                if extracted_dirs.len() == 1 {
+                    // Single directory extracted, move it to the final location
+                    fs::rename(extracted_dirs[0].path(), &final_model_dir)?;
+                    let _ = fs::remove_dir_all(&temp_extract_dir);
+                } else {
+                    // Multiple items or no directories, rename the temp directory itself
+                    fs::rename(&temp_extract_dir, &final_model_dir)?;
+                }
+                Ok(())
+            })();
+            self.extracting_models.lock().unwrap().remove(model_id);
+            if let Err(e) = extracted {
+                let _ = fs::remove_dir_all(&temp_extract_dir);
                 let _ = self.app_handle.emit(
                     "model-extraction-failed",
                     &serde_json::json!({
                         "model_id": model_id,
-                        "error": error_msg
+                        "error": e.to_string()
                     }),
                 );
-                anyhow::anyhow!(error_msg)
-            })?;
-
-            // Find the actual extracted directory (archive might have a nested structure)
-            let extracted_dirs: Vec<_> = fs::read_dir(&temp_extract_dir)?
-                .filter_map(|entry| entry.ok())
-                .filter(|entry| entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
-                .collect();
-
-            if extracted_dirs.len() == 1 {
-                // Single directory extracted, move it to the final location
-                let source_dir = extracted_dirs[0].path();
-                if final_model_dir.exists() {
-                    fs::remove_dir_all(&final_model_dir)?;
-                }
-                fs::rename(&source_dir, &final_model_dir)?;
-                // Clean up temp directory
-                let _ = fs::remove_dir_all(&temp_extract_dir);
-            } else {
-                // Multiple items or no directories, rename the temp directory itself
-                if final_model_dir.exists() {
-                    fs::remove_dir_all(&final_model_dir)?;
-                }
-                fs::rename(&temp_extract_dir, &final_model_dir)?;
+                return Err(e);
             }
 
             info!("Successfully extracted archive for model: {}", model_id);
-            // Remove from extracting set
-            {
-                let mut extracting = self.extracting_models.lock().unwrap();
-                extracting.remove(model_id);
-            }
             // Emit extraction completed event
             let _ = self.app_handle.emit("model-extraction-completed", model_id);
 

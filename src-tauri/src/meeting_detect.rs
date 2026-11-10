@@ -127,11 +127,11 @@ fn watch_end(app: &AppHandle, meetings: &Arc<MeetingManager>, id: i64) {
         }
     } else if let Some(since) = watch.ending {
         if since.elapsed() >= GRACE {
-            watch.ending = None;
-            watch.in_call = false;
             drop(watch);
-            if let Err(e) = meetings.stop() {
-                log::warn!("Meeting: can't stop after the call ended: {e}");
+            // Still ending if Stop fails, so the next poll tries again.
+            match meetings.stop() {
+                Ok(()) => *WATCH.lock().unwrap() = IDLE,
+                Err(e) => log::warn!("Meeting: can't stop after the call ended: {e}"),
             }
         }
     } else if watch.in_call {
